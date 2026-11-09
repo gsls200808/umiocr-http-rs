@@ -1,0 +1,4 @@
+* text=auto
+
+# 保证 shell 脚本在任意平台检出后仍是 LF，可直接在 Linux/macOS 执行
+*.sh text eol=lf

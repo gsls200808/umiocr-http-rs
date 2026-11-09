@@ -1,0 +1,166 @@
+name: Build & Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  # ONNX Runtime 官方发行版本；调整时同步确认 >= 1.17
+  ORT_VERSION: "1.22.0"
+  # Umi-OCR 所使用的 PP-OCR ONNX 模型（RapidOCR-json 仓库根目录的 models.7z）
+  MODELS_URL: "https://github.com/hiroi-sora/RapidOCR-json/raw/main/models.7z"
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            archive: dist/*.zip
+          - name: linux-x64
+            os: ubuntu-22.04 # 固定旧版 glibc，兼容更多发行版
+            archive: dist/*.tar.gz
+          - name: macos-arm64
+            os: macos-latest
+            archive: dist/*.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Download & extract models
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o models.7z "$MODELS_URL"
+
+          # 用仓库内的纯 Rust 解压工具，不依赖系统是否安装 7-Zip
+          cargo build --release -p unpack7z
+          UNPACK=target/release/unpack7z
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            UNPACK=target/release/unpack7z.exe
+          fi
+
+          rm -rf extracted-models
+          "$UNPACK" models.7z extracted-models
+
+          CFG="$(find extracted-models -name configs.txt -type f | head -n 1)"
+          if [ -z "$CFG" ]; then
+            echo "models.7z 中未找到 configs.txt" >&2
+            exit 1
+          fi
+          MODELS_DIR="$(cd "$(dirname "$CFG")" && pwd)"
+
+          # Windows 上的 bash 路径需转成原生路径，供 PowerShell 打包脚本使用
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            MODELS_DIR="$(cygpath -w "$MODELS_DIR")"
+          fi
+
+          echo "MODELS_DIR=$MODELS_DIR" >> "$GITHUB_ENV"
+          echo "模型目录: $MODELS_DIR"
+          ls "$MODELS_DIR" | head -n 20
+
+      - name: Download ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = $env:ORT_VERSION
+          New-Item -ItemType Directory -Force -Path runtime | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$v/onnxruntime-win-x64-$v.zip" -OutFile ort.zip
+          Expand-Archive ort.zip -DestinationPath ort
+          Copy-Item "ort/onnxruntime-win-x64-$v/lib/onnxruntime.dll" "runtime/onnxruntime.dll"
+          Get-Item runtime/onnxruntime.dll | Select-Object Name,Length
+
+      - name: Download ONNX Runtime (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime
+          curl -fsSL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+          mkdir -p ort && tar -xzf ort.tgz -C ort
+          cp "ort/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION}" runtime/libonnxruntime.so
+          ls -l runtime
+
+      - name: Download ONNX Runtime (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime
+          curl -fsSL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-universal2-${ORT_VERSION}.tgz"
+          mkdir -p ort && tar -xzf ort.tgz -C ort
+          cp "ort/onnxruntime-osx-universal2-${ORT_VERSION}/lib/libonnxruntime.${ORT_VERSION}.dylib" runtime/libonnxruntime.dylib
+          ls -l runtime
+
+      - name: Normalize config (portable package)
+        shell: bash
+        run: |
+          # 仓库里的 application.yaml 可能指向本机模型目录，制品统一改写为相对路径
+          sed -i.bak 's#^\(  engineDir:\).*#\1 "."#' configs/application.yaml
+          rm -f configs/application.yaml.bak
+          grep -n 'engineDir' configs/application.yaml
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/package.ps1 -SkipBuild `
+            -OrtLib runtime/onnxruntime.dll -ModelsDir "$env:MODELS_DIR"
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x scripts/package.sh
+          ./scripts/package.sh --skip-build --models "$MODELS_DIR"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes
+          fi

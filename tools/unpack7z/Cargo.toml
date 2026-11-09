@@ -1,0 +1,9 @@
+[package]
+name = "unpack7z"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "纯 Rust 的 7z 解压小工具，供打包脚本在无 7-Zip 环境下解出模型"
+
+[dependencies]
+sevenz-rust = { version = "0.6", default-features = false }

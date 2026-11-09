@@ -1,0 +1,17 @@
+server:
+  port: 1224
+  webDir: "./web"
+
+ocr:
+  # 包含 models/configs.txt 的目录（可为 Umi-OCR 的 RapidOCR-json 插件目录）
+  engineDir: "."
+  models: "models"
+  # 每个 ONNX 会话的线程数
+  numThread: 4
+  # rec 模型并发实例数，0 = 按 CPU 核心自动（最多 4）
+  recPool: 0
+  # 显式指定 ONNX Runtime 动态库；留空则自动查找
+  # Windows: runtime/onnxruntime.dll
+  # Linux:   runtime/libonnxruntime.so
+  # macOS:   runtime/libonnxruntime.dylib
+  ortLib: ""

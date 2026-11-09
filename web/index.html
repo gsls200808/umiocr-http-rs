@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Umi-OCR HTTP API (Rust) 测试</title>
+<style>
+  body { font-family: "Microsoft YaHei", Arial, sans-serif; margin: 0; background: #f5f7fa; color: #1e293b; }
+  .wrap { max-width: 880px; margin: 40px auto; padding: 24px; background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,.08); }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #64748b; font-size: 13px; margin-bottom: 20px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  label { font-size: 13px; min-width: 96px; }
+  select, input[type=file] { font-size: 13px; padding: 6px; border: 1px solid #cbd5e1; border-radius: 6px; }
+  button { background: #0ea5e9; color: #fff; border: 0; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  .panes { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+  .pane { flex: 1 1 380px; }
+  img { max-width: 100%; border: 1px solid #e2e8f0; border-radius: 8px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; min-height: 120px; max-height: 420px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Umi-OCR HTTP API（Rust 实现）测试页</h1>
+  <div class="sub">复用 Umi-OCR 的 RapidOCR 模型文件，推理通过 ONNX Runtime 动态库 · POST /api/ocr</div>
+
+  <div class="row">
+    <label>图片</label>
+    <input type="file" id="file" accept="image/*">
+  </div>
+  <div class="row">
+    <label>语言/模型库</label>
+    <select id="language"></select>
+    <label>排版解析</label>
+    <select id="parser">
+      <option value="multi_para">多栏-按自然段换行</option>
+      <option value="multi_line">多栏-总是换行</option>
+      <option value="multi_none">多栏-无换行</option>
+      <option value="single_para">单栏-按自然段换行</option>
+      <option value="single_line">单栏-总是换行</option>
+      <option value="single_none">单栏-无换行</option>
+      <option value="single_code">单栏-保留缩进</option>
+      <option value="none">不做处理</option>
+    </select>
+    <label>返回格式</label>
+    <select id="format">
+      <option value="text">纯文本</option>
+      <option value="dict">原始字典</option>
+    </select>
+    <button id="run" disabled>开始识别</button>
+  </div>
+
+  <div class="panes">
+    <div class="pane">
+      <div style="font-size:13px;margin-bottom:6px">预览</div>
+      <img id="preview" alt="预览">
+    </div>
+    <div class="pane">
+      <div style="font-size:13px;margin-bottom:6px">识别结果</div>
+      <pre id="out">（等待识别）</pre>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let b64 = "";
+
+fetch("/api/ocr/get_options").then(r => r.json()).then(o => {
+  const sel = $("language");
+  const opts = (o["ocr.language"] && o["ocr.language"].optionsList) || [];
+  opts.forEach(x => { const op = document.createElement("option"); op.value = x[0]; op.textContent = x[1]; sel.appendChild(op); });
+  if (o["ocr.language"]) sel.value = o["ocr.language"].default;
+  if (o["data.format"]) $("format").value = o["data.format"].default;
+  if (o["tbpu.parser"]) $("parser").value = o["tbpu.parser"].default;
+}).catch(e => console.error(e));
+
+$("file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    b64 = reader.result.split(",")[1] || reader.result;
+    $("preview").src = reader.result;
+    $("run").disabled = false;
+  };
+  reader.readAsDataURL(f);
+});
+
+$("run").addEventListener("click", async () => {
+  if (!b64) return;
+  $("run").disabled = true;
+  $("out").textContent = "识别中…";
+  const body = {
+    base64: b64,
+    options: {
+      "ocr.language": $("language").value,
+      "tbpu.parser": $("parser").value,
+      "data.format": $("format").value,
+    }
+  };
+  try {
+    const res = await fetch("/api/ocr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (data.code === 100 && typeof data.data === "string") {
+      $("out").textContent = data.data;
+    } else {
+      $("out").textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (e) {
+    $("out").textContent = "请求失败: " + e;
+  } finally {
+    $("run").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
